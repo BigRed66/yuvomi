@@ -1155,6 +1155,32 @@ function renderRecipeSidebar() {
  * Ein Knopf, der dorthin zeigt, waere ein Versprechen ins Leere - und weil er
  * dem externen Link vorgeht, naehme er auch den noch mit (#936).
  */
+const SERVINGS_KEY = 'yuvomi.fork.lastServings';
+
+/** Fork: Startwert im Dialog - gespeicherte Personen, sonst die zuletzt gewaehlte Zahl, sonst 3. */
+function initialServings(meal) {
+  if (meal?.servings) return meal.servings;
+  try {
+    const v = Number(localStorage.getItem(SERVINGS_KEY));
+    if (Number.isFinite(v) && v > 0) return v;
+  } catch { /* privater Modus */ }
+  return 3;
+}
+
+function rememberServings(v) {
+  try { localStorage.setItem(SERVINGS_KEY, String(v)); } catch { /* privater Modus */ }
+}
+
+/** Fork: Personenzahl ohne ueberfluessige Nachkommastellen, mit Komma. */
+function formatServings(n) {
+  return String(Math.round(Number(n) * 100) / 100).replace('.', ',');
+}
+
+/** Fork: „3 Personen" / „1 Person" (nur Deutsch, der Fork ist ein Haushalt). */
+function servingsLabel(n) {
+  return `${formatServings(n)} ${Number(n) === 1 ? 'Person' : 'Personen'}`;
+}
+
 function recipesReachable() {
   return !window.yuvomi?.isModuleDisabled?.('recipes');
 }
@@ -1220,6 +1246,10 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
     // Luft; der Avatar steht davor. Bei `read` bleibt er stehen: er ist
     // Zustand, keine Handlung (Regel 2).
     const cookMark = mealCookMarkHtml(meal);
+    // Fork: Personenzahl (= Skalierungsfaktor des Rezepts), siehe server/services/meal-servings.js
+    const servingsMark = meal.servings
+      ? `<span class="meal-card__servings" title="${esc(servingsLabel(meal.servings))}" aria-label="${esc(servingsLabel(meal.servings))}"><i data-lucide="users" class="icon-sm" aria-hidden="true"></i>${esc(formatServings(meal.servings))}</span>`
+      : '';
     const recurrenceBadge = meal.recurrence_template_id
       ? `<span class="meal-card__recurrence" aria-label="${t('meals.recurrenceBadge')}"><i data-lucide="repeat-2" class="icon-sm" aria-hidden="true"></i></span>`
       : '';
@@ -1259,8 +1289,8 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
             className: 'meal-card__thumb',
           }) : ''}
           <span class="meal-card__title"><span class="meal-card__type">${esc(type.label)}</span><span class="meal-card__title-text">${esc(meal.title)}</span>${recurrenceBadge}</span>
-          ${ingLabel || cookMark ? `<span class="meal-card__meta">
-            ${cookMark}${ingLabel ? `<span class="meal-card__ingredients-count">${ingLabel}${esc(ingDoneLabel)}</span>` : ''}
+          ${ingLabel || cookMark || servingsMark ? `<span class="meal-card__meta">
+            ${cookMark}${servingsMark}${ingLabel ? `<span class="meal-card__ingredients-count">${ingLabel}${esc(ingDoneLabel)}</span>` : ''}
           </span>` : ''}${ro ? readRowHintHtml() : ''}
         </button>
         ${ro ? '' : `<span class="meal-card__drag" role="img"
@@ -1270,7 +1300,7 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
         <div class="meal-card__actions">
           ${meal.recipe_id && recipesReachable() ? `<a class="meal-card__action-btn meal-card__action-btn--recipe"
             data-action="open-linked-recipe"
-            href="/recipes?open=${encodeURIComponent(meal.recipe_id)}"
+            href="/recipes?open=${encodeURIComponent(meal.recipe_id)}${meal.servings ? `&scale=${encodeURIComponent(meal.servings)}` : ''}"
             aria-label="${esc(t('meals.viewRecipeNamed', { title: meal.title }))}"
           ><i data-lucide="chef-hat" class="icon-md" aria-hidden="true"></i></a>`
           : externalHref(meal.recipe_url) ? `<a class="meal-card__action-btn meal-card__action-btn--recipe"
@@ -2092,7 +2122,7 @@ function openMealModal(opts) {
       };
 
       recipeSelect?.addEventListener('change', () => {
-        if (recipeScaleInput) recipeScaleInput.value = '1';
+        // Fork: die Personenzahl bleibt stehen, das Rezept wird gleich dafuer skaliert.
         applyRecipe(recipeSelect.value);
       });
 
@@ -2100,7 +2130,6 @@ function openMealModal(opts) {
       // Rezepttreffer geht denselben Weg wie die Rezeptauswahl darunter.
       const chooseRecipe = (id) => {
         if (recipeSelect) recipeSelect.value = String(id);
-        if (recipeScaleInput) recipeScaleInput.value = '1';
         applyRecipe(id);
       };
       wireMealTitleCombobox(panel, { onRecipe: chooseRecipe });
@@ -2531,8 +2560,8 @@ function buildModalContent({ mode, date, mealType, meal, recipeId = null }) {
 
     <div class="modal-grid modal-grid--2">
       <div class="form-group">
-        <label class="form-label" for="modal-recipe-scale">${t('meals.recipeScaleLabel')}</label>
-        <input type="number" class="form-input" id="modal-recipe-scale" min="0.1" step="0.1" value="1">
+        <label class="form-label" for="modal-recipe-scale">Personen (Skalierung)</label>
+        <input type="number" class="form-input" id="modal-recipe-scale" min="0.5" max="99" step="0.5" value="${esc(String(initialServings(isEdit ? meal : null)))}">
       </div>
       <div class="form-group" style="display:flex;align-items:flex-end;">
         <button class="btn btn--secondary" id="modal-save-as-recipe" type="button">${t('meals.saveAsRecipe')}</button>
@@ -2682,6 +2711,10 @@ async function saveModal(overlay) {
   const recipe_url = overlay.querySelector('#modal-recipe-url').value.trim() || null;
   const recipe_id = overlay.querySelector('#modal-recipe-id')?.value || null;
   const cook_user_id = selectedCookId(overlay);
+  // Fork: Personenzahl (= Skalierungsfaktor) wird an der Mahlzeit gespeichert.
+  const servingsRaw = Number(overlay.querySelector('#modal-recipe-scale')?.value);
+  const servings = Number.isFinite(servingsRaw) && servingsRaw > 0 ? servingsRaw : null;
+  if (servings) rememberServings(servings);
   const repeat_weekly = state.modal?.mode === 'create'
     ? Boolean(overlay.querySelector('#modal-repeat-weekly')?.checked)
     : false;
@@ -2719,7 +2752,7 @@ async function saveModal(overlay) {
     const { mode, meal } = state.modal;
 
     if (mode === 'create') {
-      const res     = await api.post('/meals', { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id, ingredients, repeat_weekly, repeat_until });
+      const res     = await api.post('/meals', { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id, ingredients, repeat_weekly, repeat_until, servings });
       state.meals.push(res.data);
     } else {
       if (scope === 'series') {
@@ -2729,12 +2762,12 @@ async function saveModal(overlay) {
         // (#1679, `cookTouched` - siehe wireCookPicker()). Der Server schreibt
         // einen mitgeschickten Koch auf die Vorlage und auf JEDE Mahlzeit der
         // Serie; ein fehlendes Feld laesst alle, wie sie sind.
-        const seriesBody = { meal_type, title, notes, recipe_url, recipe_id, ingredients, repeat_until };
+        const seriesBody = { meal_type, title, notes, recipe_url, recipe_id, ingredients, repeat_until, servings };
         if (state.modal.cookTouched) seriesBody.cook_user_id = cook_user_id;
         await api.put(`/meals/${meal.id}?scope=series`, seriesBody);
       } else {
         // Nur diese Instanz
-        await api.put(`/meals/${meal.id}`, { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id });
+        await api.put(`/meals/${meal.id}`, { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id, servings });
 
         // Zutaten synchronisieren
         const existingIds = new Set((meal.ingredients ?? []).map((i) => i.id));

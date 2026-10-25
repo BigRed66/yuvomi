@@ -1707,3 +1707,14 @@
   flex-wrap: wrap;
   gap: var(--space-2);
 }
+
+/* Fork: Personenzahl in der Meta-Zeile der Karte (server/services/meal-servings.js) */
+.meal-card__servings {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  margin-inline-end: var(--space-2);
+}

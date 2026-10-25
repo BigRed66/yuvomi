@@ -28,6 +28,7 @@ import { openDetailView, closeDetailView, detailFooterEl, withPrimaryEdit } from
 import { mayWritePath } from '/utils/module-access.js';
 import { errorSentence, isGone, isAlreadyDeleted } from '/utils/friendly-error.js';
 import { ingredientMatchKey } from '/utils/ingredient-match-key.js';
+import { recipeFactor, setRecipeFactor, adoptFactorFromQuery, scaleQuantity, servingsText, MIN_SERVINGS, MAX_SERVINGS } from '/utils/fork-servings.js';
 
 let _container = null;
 /**
@@ -393,6 +394,8 @@ function fabEl() {
 export async function render(container, { signal } = {}) {
   _container = container;
   _md = null;
+  // Fork: Personenzahl aus dem Wochenplan (`?open=<id>&scale=<n>`) uebernehmen.
+  adoptFactorFromQuery();
 
   // `state` ueberlebt den Seitenwechsel. Wer zuletzt nach "Suppe" gesucht oder
   // auf Mealie gefiltert hat, kaeme sonst per Deep-Link auf eine Liste zurueck,
@@ -1251,6 +1254,10 @@ function ingredientsSectionEl(recipe) {
   const section = detailSectionEl(t('recipes.ingredientsLabel'));
   section.classList.add('recipe-detail__ingredients-section');
   section.dataset.recipeId = String(recipe.id);
+  // Fork: Personen-Regler. Die Rezepte sind pro Person gespeichert, der Faktor
+  // ist also die Personenzahl; Backrezepte stehen als ganzes Rezept da.
+  const factor = recipeFactor(recipe.id);
+  section.appendChild(servingsStepperEl(recipe, factor));
   const ul = document.createElement('ul');
   ul.className = 'recipe-detail__ingredients';
   for (const ing of ingredients) {
@@ -1265,7 +1272,7 @@ function ingredientsSectionEl(recipe) {
     // steht auch ohne Menge da (leer), damit der Name seine Spalte haelt.
     const quantity = document.createElement('span');
     quantity.className = 'recipe-detail__ingredient-quantity';
-    quantity.textContent = ing.quantity ?? '';
+    quantity.textContent = scaleQuantity(ing.quantity ?? '', factor);
     item.appendChild(quantity);
     label.textContent = ing.name;
     item.appendChild(label);
@@ -1286,6 +1293,49 @@ function ingredientsSectionEl(recipe) {
   const bulk = pantryMatchBulkEl(recipe);
   if (bulk) section.appendChild(bulk);
   return section;
+}
+
+/**
+ * Fork: „Personen  [–] 3 [+]" ueber der Zutatenliste. Backrezepte (Notiz sagt
+ * „Skalierungsfaktor 1 = 1 Rezept") zaehlen in Rezepten statt Personen.
+ */
+function servingsStepperEl(recipe, factor) {
+  const perRecipe = /Skalierungsfaktor 1 = 1 Rezept/.test(recipe.notes ?? '');
+  const wrap = document.createElement('div');
+  wrap.className = 'recipe-detail__servings';
+  const label = document.createElement('span');
+  label.className = 'recipe-detail__servings-label';
+  label.textContent = perRecipe ? 'Menge' : 'Personen';
+  const value = document.createElement('output');
+  value.className = 'recipe-detail__servings-value';
+  value.textContent = perRecipe ? `${String(factor).replace('.', ',')} × Rezept` : servingsText(factor);
+  const step = perRecipe ? 0.5 : 1;
+  const mk = (delta, icon, aria) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn--icon btn--icon-sm recipe-detail__servings-btn';
+    b.setAttribute('aria-label', aria);
+    b.innerHTML = `<i data-lucide="${icon}" class="icon-sm" aria-hidden="true"></i>`;
+    const next = Math.round((factor + delta) * 100) / 100;
+    b.disabled = next < MIN_SERVINGS || next > MAX_SERVINGS;
+    b.addEventListener('click', () => {
+      setRecipeFactor(recipe.id, next);
+      // Das Leseblatt liegt nicht zwingend in _container: den eigenen Abschnitt
+      // direkt ersetzen, die Kopie in der Detailspalte ueber den Sammelweg.
+      const own = b.closest('.recipe-detail__ingredients-section');
+      if (own) {
+        const fresh = ingredientsSectionEl(recipe);
+        own.replaceWith(fresh);
+        if (window.lucide) window.lucide.createIcons({ el: fresh });
+        fresh.querySelector(`.recipe-detail__servings-btn[aria-label="${CSS.escape(b.getAttribute('aria-label'))}"]`)?.focus();
+      }
+      renderIngredientSections(recipe);
+    });
+    return b;
+  };
+  wrap.append(label, mk(-step, 'minus', perRecipe ? 'Weniger' : 'Eine Person weniger'), value,
+    mk(step, 'plus', perRecipe ? 'Mehr' : 'Eine Person mehr'));
+  return wrap;
 }
 
 /** Baut jeden Zutaten-Abschnitt dieses Rezepts neu (Aufklapper + Spalte). */

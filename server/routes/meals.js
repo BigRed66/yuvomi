@@ -12,6 +12,7 @@ import { addDays, mealWeekday, datesForTemplateInRange } from '../services/meal-
 import { todayKey } from '../utils/timezone.js';
 import { mayWriteModule } from '../permissions.js';
 import { MEAL_COOK_COLUMNS_SQL, MEAL_COOK_JOIN_SQL, cookField, cookForNewOccurrence, cookRefusal } from '../services/meal-cook.js';
+import { servingsField, setServings, servingsMap, servingsFor, deleteServings } from '../services/meal-servings.js';
 
 const log = createLogger('Meals');
 
@@ -90,7 +91,7 @@ function loadMealWithIngredients(id) {
   `).get(id);
   if (!meal) return null;
   const ingredients = db.get().prepare('SELECT * FROM meal_ingredients WHERE meal_id = ? ORDER BY id ASC').all(id);
-  return { ...meal, ingredients }; 
+  return { ...meal, ingredients, servings: servingsFor(id) };
 }
 
 function deleteMealOccurrence(meal, actorId) {
@@ -102,6 +103,7 @@ function deleteMealOccurrence(meal, actorId) {
     `).run(meal.recurrence_template_id, meal.date, actorId);
   }
   db.get().prepare('DELETE FROM meals WHERE id = ?').run(meal.id);
+  deleteServings(meal.id);
 }
 
 function createMealRecord({ date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id = null, ingredients = [] }, actorId) {
@@ -355,10 +357,12 @@ router.get('/', (req, res) => {
       for (const m of fromRecipe) recipeCountMap[m.id] = byRecipe[m.recipe_id] ?? 0;
     }
 
+    const servings = servingsMap(mealIds);
     const result = meals.map((m) => ({
       ...m,
       ingredients: ingredientMap[m.id] || [],
       recipe_ingredient_count: recipeCountMap[m.id] ?? 0,
+      servings: servings[m.id] ?? null,
     }));
 
     res.json({ data: result, weekStart: from, weekEnd: to });
@@ -396,7 +400,8 @@ router.post('/', (req, res) => {
     const vRepeatUntil = repeatWeekly
       ? date(req.body.repeat_until, 'Wiederholungs-Ende')
       : { value: null, error: null };
-    const errors = collectErrors([vDate, vType, vTitle, vNotes, vRecipeUrl, vRecipeId, vCook, vRepeatUntil]);
+    const vServings = servingsField(req.body.servings);
+    const errors = collectErrors([vDate, vType, vTitle, vNotes, vRecipeUrl, vRecipeId, vCook, vRepeatUntil, vServings]);
     if (!req.body.meal_type) errors.push('Mahlzeit-Typ ist erforderlich.');
     if (vRepeatUntil.value && vDate.value && vRepeatUntil.value < vDate.value) {
       errors.push('Wiederholungs-Ende darf nicht vor dem Datum liegen.');
@@ -456,6 +461,7 @@ router.post('/', (req, res) => {
       const mealId = result.lastInsertRowid;
 
       insertMealIngredients(mealId, cleanIngredients);
+      if (vServings.value !== null) setServings(mealId, vServings.value);
 
       return loadMealWithIngredients(mealId);
     });
@@ -600,8 +606,14 @@ router.put('/:id', (req, res) => {
     if (req.body.recipe_id  !== undefined) checks.push(num(req.body.recipe_id, 'Rezept-ID', { required: false }));
     const vCook = cookField(req.body.cook_user_id);
     checks.push(vCook);
+    const vServings = servingsField(req.body.servings);
+    checks.push(vServings);
     const errors = collectErrors(checks);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
+
+    // Personenzahl gilt immer nur fuer DIESE Mahlzeit, auch bei scope=series
+    // (jede Woche kann anders besetzt sein).
+    if (vServings.given) setServings(id, vServings.value);
 
     if (req.body.recipe_id !== undefined && req.body.recipe_id !== null && req.body.recipe_id !== '') {
       const recipeExists = db.get().prepare('SELECT id FROM recipes WHERE id = ?').get(req.body.recipe_id);
