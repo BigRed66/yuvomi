@@ -134,3 +134,30 @@ function snapToWhole(value) {
   const gap = Math.abs(value - whole);
   return whole !== 0 && gap <= SNAP_ABSOLUTE && gap <= Math.abs(value) * SNAP_RELATIVE ? whole : value;
 }
+
+/**
+ * Zeilen einer schon geplanten Mahlzeit, die mit einem neuen Faktor neu
+ * gerechnet werden (#2235).
+ *
+ * Jede Zeile merkt sich ihre Menge und den Faktor, zu dem diese Menge gehoert -
+ * anfangs der Stand, mit dem der Dialog geoeffnet wurde. Gerechnet wird immer
+ * von dort aus, nicht von der letzten Anzeige, sonst summierte sich die Rundung
+ * mit jedem Tastendruck. Tippt jemand eine Menge von Hand (`note`), wird sie fuer
+ * ihre Zeile die neue Basis: der naechste Faktorwechsel rechnet von ihr aus
+ * weiter, statt sie mit dem Stand beim Oeffnen zu ueberschreiben.
+ *
+ * @param {Array<{ key: unknown, qty: string }>} entries
+ * @param {number} baseFactor  Faktor, zu dem die Mengen in `entries` gehoeren.
+ */
+export function createRowScaler(entries, baseFactor = 1) {
+  const rows = entries.map(({ key, qty }) => ({ key, qty: qty ?? '', factor: baseFactor }));
+  return {
+    note(key, qty, factor) {
+      const row = rows.find((r) => r.key === key);
+      if (row && factor > 0) Object.assign(row, { qty: qty ?? '', factor });
+    },
+    scaled(factor) {
+      return rows.map(({ key, qty, factor: base }) => ({ key, qty: scaleQuantityText(qty, factor / base) }));
+    },
+  };
+}

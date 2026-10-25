@@ -8,7 +8,7 @@ import { api } from '/api.js';
 import { openModal as openSharedModal, closeModal as closeSharedModal, selectModal, confirmModal, askOverModal, advancedSection, wireBlurValidation, reportFieldError, reportFieldErrors, refocusAfterRender, swapFieldsKeepingDirtyBase, captureModalContext, isOwnModalOpen } from '/components/modal.js';
 import { stagger, scheduleUndoableDelete, wireScrollFade, isImeComposing } from '/utils/ux.js';
 import { releaseAddressOnClose } from '/utils/master-detail.js';
-import { t, formatDayMonth, formatDateInput, parseDateInput, isDateInputValid } from '/i18n.js';
+import { t, formatDayMonth, formatDateInput, parseDateInput, isDateInputValid, getNumberFormat } from '/i18n.js';
 import { dateRangeText, dateText } from '/utils/date-format.js';
 import { esc, REQUIRED_MARK, externalHref } from '/utils/html.js';
 import { formSwitchRowHtml } from '/settings/components.js';
@@ -27,7 +27,7 @@ import { pageToolsMenuHtml, installPopoverMenus, syncPopoverMenuItem } from '/ut
 import { zonedWeekday, nowFields } from '/utils/timezone.js';
 import { mealTypeList, primeMealTypeNames, MEAL_TYPE_KEYS } from '/utils/meal-types.js';
 import { recipeThumbHtml, wireRecipeThumbs } from '/utils/recipe-thumb.js';
-import { scaleQuantityText } from '/utils/scale-quantity.js';
+import { scaleQuantityText, createRowScaler } from '/utils/scale-quantity.js';
 import { mayWritePath } from '/utils/module-access.js';
 import { readRowHtml, readRowHintHtml } from '/utils/read-row.js';
 import { renderUserMultiSelect, getSelectedUserIds, bindUserMultiSelect, renderAvatarStack } from '/components/user-multi-select.js';
@@ -1256,6 +1256,12 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
     // Luft; der Avatar steht davor. Bei `read` bleibt er stehen: er ist
     // Zustand, keine Handlung (Regel 2).
     const cookMark = mealCookMarkHtml(meal);
+    // DER FAKTOR STEHT NEBEN DEM KOCH (v259): "x2" sagt auf einen Blick, dass
+    // diese Mahlzeit nicht in der Grundmenge des Rezepts geplant ist. Nur mit
+    // Rezept - ohne gibt es keine Grundmenge, von der er abweicht.
+    const scaleMark = meal.recipe_id && meal.recipe_scale
+      ? `<span class="meal-card__scale" title="${esc(t('meals.recipeScaleBadgeLabel', { factor: formatScale(meal.recipe_scale) }))}"><span aria-hidden="true">${esc(t('meals.recipeScaleBadge', { factor: formatScale(meal.recipe_scale) }))}</span><span class="sr-only">${esc(t('meals.recipeScaleBadgeLabel', { factor: formatScale(meal.recipe_scale) }))}</span></span>`
+      : '';
     const recurrenceBadge = meal.recurrence_template_id
       ? `<span class="meal-card__recurrence" aria-label="${t('meals.recurrenceBadge')}"><i data-lucide="repeat-2" class="icon-sm" aria-hidden="true"></i></span>`
       : '';
@@ -1295,8 +1301,8 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
             className: 'meal-card__thumb',
           }) : ''}
           <span class="meal-card__title"><span class="meal-card__type">${esc(type.label)}</span><span class="meal-card__title-text">${esc(meal.title)}</span>${recurrenceBadge}</span>
-          ${ingLabel || cookMark ? `<span class="meal-card__meta">
-            ${cookMark}${ingLabel ? `<span class="meal-card__ingredients-count">${ingLabel}${esc(ingDoneLabel)}</span>` : ''}
+          ${ingLabel || cookMark || scaleMark ? `<span class="meal-card__meta">
+            ${cookMark}${scaleMark}${ingLabel ? `<span class="meal-card__ingredients-count">${ingLabel}${esc(ingDoneLabel)}</span>` : ''}
           </span>` : ''}${ro ? readRowHintHtml() : ''}
         </button>
         ${ro ? '' : `<span class="meal-card__drag" role="img"
@@ -1310,7 +1316,7 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
         <div class="meal-card__actions">
           ${meal.recipe_id && recipesReachable() ? `<a class="meal-card__action-btn meal-card__action-btn--recipe"
             data-action="open-linked-recipe"
-            href="/recipes?open=${encodeURIComponent(meal.recipe_id)}"
+            href="/recipes?open=${encodeURIComponent(meal.recipe_id)}${meal.recipe_scale ? `&scale=${encodeURIComponent(meal.recipe_scale)}` : ''}"
             aria-label="${esc(t('meals.viewRecipeNamed', { title: meal.title }))}"
             title="${esc(t('meals.openRecipe'))}"
           ><i data-lucide="chef-hat" class="icon-md" aria-hidden="true"></i></a>`
@@ -2041,12 +2047,49 @@ function openMealModal(opts) {
       // stehen Titel, Zutaten und Notizen gleich da.
       if (opts.recipeId) chooseRecipe(opts.recipeId);
 
+      // DER GESPEICHERTE FAKTOR (v259) steht beim Oeffnen im Feld. Aendert ihn
+      // jemand an einer schon geplanten Mahlzeit, gehen die Zutaten mit - und
+      // zwar von dem Stand aus, mit dem der Dialog geoeffnet wurde, nicht von
+      // Tastendruck zu Tastendruck (sonst summierte sich die Rundung). Eigene
+      // Aenderungen an Name und Kategorie bleiben stehen; nur die Menge rechnet.
+      // Eine von Hand getippte Menge wird fuer ihre Zeile die neue Basis
+      // (createRowScaler) - ein weiterer Faktorwechsel ueberschreibt sie nicht.
+      let scaleBase = null;
+      const rowsOf = (qtyOf) => [...ingList.querySelectorAll('.ingredient-row')]
+        .map((row, i) => ({ key: row, qty: qtyOf(row, i) }));
+      ingList.addEventListener('input', (e) => {
+        if (!scaleBase || !e.target.classList?.contains('ingredient-row__qty')) return;
+        const factor = Number(recipeScaleInput?.value || 1);
+        if (!Number.isFinite(factor) || factor <= 0) return;
+        scaleBase.note(e.target.closest('.ingredient-row'), e.target.value, Math.max(factor, 0.1));
+      });
+      const rescaleMealRows = (factor) => {
+        const readList = panel.querySelector('#meal-own-ingredients');
+        if (readList?.hidden === true) {
+          // Noch die Leseliste des Rezepts: als eigene Zeilen in der neuen Menge
+          // uebernehmen, sonst ginge der Faktor beim Einkauf verloren.
+          const base = recipeIngredientsOf(meal);
+          recipeIngredientsToRows(panel, base.map((ing) => ({ ...ing, quantity: scaleQuantityText(ing.quantity ?? '', factor) })));
+          scaleBase = createRowScaler(rowsOf((_row, i) => base[i]?.quantity ?? ''), 1);
+          return;
+        }
+        scaleBase ??= createRowScaler(
+          rowsOf((row) => row.querySelector('.ingredient-row__qty')?.value ?? ''), mealScale(meal));
+        for (const { key: row, qty } of scaleBase.scaled(factor)) {
+          const input = row.isConnected ? row.querySelector('.ingredient-row__qty') : null;
+          if (input) input.value = qty;
+        }
+      };
+
       recipeScaleInput?.addEventListener('input', () => {
         const currentRecipeId = Number(recipeSelect?.value || 0);
-        if (!currentRecipeId || !currentAppliedRecipe) return;
-
         const factor = Number(recipeScaleInput.value || 1);
         if (!Number.isFinite(factor) || factor <= 0) return;
+        if (currentRecipeId && !currentAppliedRecipe && isEdit && meal?.recipe_id === currentRecipeId) {
+          rescaleMealRows(Math.max(factor, 0.1));
+          return;
+        }
+        if (!currentRecipeId || !currentAppliedRecipe) return;
 
         ingList.replaceChildren();
         ingList.insertAdjacentHTML('beforeend', (currentAppliedRecipe.ingredients || [])
@@ -2389,6 +2432,17 @@ function wireMealTypeChips(panel) {
  * Die Zutaten, die fuer eine Mahlzeit aus dem REZEPT gelten: nur solange sie
  * keine eigenen hat (dieselbe Regel wie der Server, mealPlanSource).
  */
+/** Der gespeicherte Faktor einer Mahlzeit, 1 wenn sie nicht skaliert ist (v259). */
+function mealScale(meal) {
+  const n = Number(meal?.recipe_scale);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+/** Ein Faktor in der Schreibweise der Region, ohne ueberfluessige Nullen. */
+function formatScale(value) {
+  return getNumberFormat({ maximumFractionDigits: 2 }).format(value);
+}
+
 function recipeIngredientsOf(meal) {
   if (!meal?.recipe_id || meal.ingredients?.length) return [];
   const recipe = state.recipes.find((r) => r.id === meal.recipe_id);
@@ -2516,7 +2570,7 @@ function buildModalContent({ mode, date, mealType, meal, recipeId = null }) {
     <div class="modal-grid modal-grid--2">
       <div class="form-group">
         <label class="form-label" for="modal-recipe-scale">${t('meals.recipeScaleLabel')}</label>
-        <input type="number" class="form-input" id="modal-recipe-scale" min="0.1" step="0.1" value="1">
+        <input type="number" class="form-input" id="modal-recipe-scale" min="0.1" max="100" step="0.1" value="${esc(String(isEdit && meal.recipe_scale ? meal.recipe_scale : 1))}">
       </div>
       <div class="form-group" style="display:flex;align-items:flex-end;">
         <button class="btn btn--secondary" id="modal-save-as-recipe" type="button">${t('meals.saveAsRecipe')}</button>
@@ -2604,7 +2658,10 @@ function buildModalContent({ mode, date, mealType, meal, recipeId = null }) {
         <button type="button" class="btn btn--ghost btn--sm" id="meal-recipe-ingredients-edit">${t('meals.recipeIngredientsEdit')}</button>
       </div>
       <ul class="meal-recipe-ingredients__list" aria-labelledby="meal-recipe-ingredients-label">
-        ${recipeIngs.map((ing) => `<li>${ing.quantity ? `<span class="meal-recipe-ingredients__qty">${esc(ing.quantity)}</span> ` : ''}${esc(ing.name)}</li>`).join('')}
+        ${recipeIngs.map((ing) => {
+          const qty = scaleQuantityText(ing.quantity ?? '', mealScale(meal));
+          return `<li>${qty ? `<span class="meal-recipe-ingredients__qty">${esc(qty)}</span> ` : ''}${esc(ing.name)}</li>`;
+        }).join('')}
       </ul>
       <div id="meal-own-ingredients" hidden>${ingFieldsHtml}</div>
     </div>`
@@ -2681,6 +2738,9 @@ async function saveModal(overlay) {
   const recipe_url = overlay.querySelector('#modal-recipe-url').value.trim() || null;
   const recipe_id = overlay.querySelector('#modal-recipe-id')?.value || null;
   const cook_user_id = selectedCookId(overlay);
+  // Der Faktor zaehlt nur mit Rezept: ohne gibt es nichts, was er skaliert.
+  const scaleRaw = Number(overlay.querySelector('#modal-recipe-scale')?.value);
+  const recipe_scale = recipe_id && Number.isFinite(scaleRaw) && scaleRaw > 0 && scaleRaw !== 1 ? scaleRaw : null;
   const repeat_weekly = state.modal?.mode === 'create'
     ? Boolean(overlay.querySelector('#modal-repeat-weekly')?.checked)
     : false;
@@ -2718,7 +2778,7 @@ async function saveModal(overlay) {
     const { mode, meal } = state.modal;
 
     if (mode === 'create') {
-      const res     = await api.post('/meals', { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id, ingredients, repeat_weekly, repeat_until });
+      const res     = await api.post('/meals', { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id, recipe_scale, ingredients, repeat_weekly, repeat_until });
       state.meals.push(res.data);
     } else {
       if (scope === 'series') {
@@ -2728,12 +2788,12 @@ async function saveModal(overlay) {
         // (#1679, `cookTouched` - siehe wireCookPicker()). Der Server schreibt
         // einen mitgeschickten Koch auf die Vorlage und auf JEDE Mahlzeit der
         // Serie; ein fehlendes Feld laesst alle, wie sie sind.
-        const seriesBody = { meal_type, title, notes, recipe_url, recipe_id, ingredients, repeat_until };
+        const seriesBody = { meal_type, title, notes, recipe_url, recipe_id, recipe_scale, ingredients, repeat_until };
         if (state.modal.cookTouched) seriesBody.cook_user_id = cook_user_id;
         await api.put(`/meals/${meal.id}?scope=series`, seriesBody);
       } else {
         // Nur diese Instanz
-        await api.put(`/meals/${meal.id}`, { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id });
+        await api.put(`/meals/${meal.id}`, { date, meal_type, title, notes, recipe_url, recipe_id, cook_user_id, recipe_scale });
 
         // Zutaten synchronisieren
         const existingIds = new Set((meal.ingredients ?? []).map((i) => i.id));
