@@ -703,6 +703,20 @@ function scaled(locale, quantity, factor, erwartet) {
   assert(ist === erwartet, `${locale}: "${quantity}" x${factor} -> "${ist}", erwartet "${erwartet}"`);
 }
 
+test('Skalieren: was nur durch Rundung neben einer ganzen Zahl liegt, wird die ganze Zahl', () => {
+  // Pro Person gespeicherte Rezepte tragen gerundete Drittel: 0,33 x 3 ist eine Paprika.
+  scaled('de', '0,33', 3, '1');
+  scaled('de', '0,33 Paprika', 3, '1 Paprika');
+  scaled('de', '63,33 ml', 3, '190 ml');
+  scaled('de', '0,66 Zwiebel', 3, '2 Zwiebel');
+  scaled('en', '0.33 cup', 3, '1 cup');
+  // Gewollte Mengen bleiben: der Abstand ist groesser als die Rundung.
+  scaled('de', '16,5 g', 3, '49,5 g');
+  scaled('de', '0,5 Bund', 3, '1,5 Bund');
+  scaled('de', '0,17 Bund', 3, '0,51 Bund');
+  scaled('de', '1,45 l', 2, '2,9 l');
+});
+
 test('Skalieren: die gewoehnlichen Zutatenmengen rechnen wie bisher', () => {
   scaled('de', '250 g', 2, '500 g');
   scaled('de', '1 kg', 2, '2 kg');

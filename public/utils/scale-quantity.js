@@ -119,5 +119,18 @@ export function scaleQuantityText(quantity, factor) {
  * einem saubereren Endzustand stehen bei `toStoredNumber` in utils/money.js.
  */
 function formatScaledQuantity(value) {
-  return toStoredNumber(value);
+  return toStoredNumber(snapToWhole(value));
+}
+
+// Eine Menge, die nur durch Rundung knapp neben einer ganzen Zahl liegt, ist
+// diese ganze Zahl: "0,33 Paprika" mal 3 sind eine Paprika, nicht 0,99, und
+// 63,33 ml mal 3 sind 190 ml. Die Schwelle ist eng genug, dass eine gewollte
+// Menge stehen bleibt - 49,5 g oder 2,9 l bleiben, wie sie sind.
+const SNAP_ABSOLUTE = 0.05;
+const SNAP_RELATIVE = 0.02;
+
+function snapToWhole(value) {
+  const whole = Math.round(value);
+  const gap = Math.abs(value - whole);
+  return whole !== 0 && gap <= SNAP_ABSOLUTE && gap <= Math.abs(value) * SNAP_RELATIVE ? whole : value;
 }
